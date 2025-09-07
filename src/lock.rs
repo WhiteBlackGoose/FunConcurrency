@@ -91,6 +91,8 @@ impl<'a, T> LockExclusiveGuard<'a, T> {
     }
 }
 
+// -------------------------------------------------
+
 impl<T> Lock<T> {
     const LOCK_FREE: u64 = 0;
     const LOCK_ALLOC: u64 = 0x1 << 63;
