@@ -1,5 +1,5 @@
 use std::alloc::{alloc, dealloc, Layout};
-use std::mem::forget;
+use std::mem::{forget, MaybeUninit};
 use std::sync::atomic::*;
 
 use lock::{Lock, LockSharedGuard};
@@ -23,15 +23,14 @@ impl<T: Send + Sync> AVec<T> {
         inner: LockSharedGuard<'a, AVecInner<T>, AVecInner<T>>,
     ) -> LockSharedGuard<'a, AVecInner<T>, AVecInner<T>> {
         if inner.cap < cap {
-            let inner = inner.upgrade();
+            let mut inner = inner.upgrade();
             let new_inner = AVecInner {
-                data: unsafe { alloc(Layout::array::<T>(inner.cap * 2).unwrap()) },
+                data: unsafe { alloc(Layout::array::<T>(inner.cap * 2).unwrap()) as *mut T },
                 cap: inner.cap * 2,
                 len: AtomicUsize::new(inner.len.load(Ordering::Relaxed)),
             };
-            /*
             unsafe {
-                std::ptr::copy(inner.data as *const T, new_inner.data as *mut T, inner.cap);
+                std::ptr::copy(inner.data as *const T, new_inner.data, inner.cap);
             }
             unsafe {
                 dealloc(
@@ -39,7 +38,7 @@ impl<T: Send + Sync> AVec<T> {
                     Layout::array::<T>(inner.cap).unwrap(),
                 );
             }
-            */
+            *inner = new_inner;
             inner.downgrade()
         } else {
             inner
@@ -48,10 +47,10 @@ impl<T: Send + Sync> AVec<T> {
 
     fn push(&self, el: T) {
         let inner = self.lock.lock_shared();
-        let new_len = inner.len.fetch_add(1, Ordering::Relaxed);
-        let inner = self.ensure_cap(new_len, inner);
+        let top_element = inner.len.fetch_add(1, Ordering::Relaxed);
+        let inner = self.ensure_cap(top_element + 1, inner);
         unsafe {
-            std::ptr::copy(&el as *const T, inner.data.add(new_len), 1);
+            std::ptr::copy(&el as *const T, inner.data.add(top_element), 1);
         }
         forget(el);
     }
@@ -101,7 +100,23 @@ impl<T> Drop for AVec<T> {
     fn drop(&mut self) {
         let inner = self.lock.lock_exclusive();
         let len = inner.len.load(Ordering::Relaxed);
-        // TODO
+        for i in 0..len {
+            let mut el = MaybeUninit::uninit();
+            unsafe {
+                std::ptr::copy(
+                    inner.data.add(i),
+                    &mut el as *mut MaybeUninit<T> as *mut T,
+                    1,
+                );
+                let _ = el.assume_init();
+            }
+        }
+        unsafe {
+            dealloc(
+                inner.data as *mut u8,
+                Layout::array::<T>(inner.cap).unwrap(),
+            );
+        }
     }
 }
 
@@ -122,8 +137,8 @@ fn main() {
 #[test]
 fn many_threads() {
     let avec = AVec::new(1);
-    const THREAD_COUNT: usize = 1;
-    const ELEMENT_COUNT: usize = 20;
+    const THREAD_COUNT: usize = 12;
+    const ELEMENT_COUNT: usize = 200;
     std::thread::scope(|s| {
         for _ in 0..THREAD_COUNT {
             s.spawn(|| {
@@ -140,6 +155,6 @@ fn many_threads() {
     }
     assert_eq!(
         sum,
-        (THREAD_COUNT * ELEMENT_COUNT) * (THREAD_COUNT * ELEMENT_COUNT + 1) / 2
+        THREAD_COUNT * (ELEMENT_COUNT * (ELEMENT_COUNT + 1)) / 2
     );
 }
