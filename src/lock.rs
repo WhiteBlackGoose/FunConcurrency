@@ -143,3 +143,108 @@ impl<T> Lock<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    use super::Lock;
+
+    #[test]
+    fn shared_exclusive() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let _g1 = lock.lock_shared();
+            let _g2 = lock.lock_exclusive();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+    }
+
+    #[test]
+    fn exclusive_shared() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let _g1 = lock.lock_exclusive();
+            let _g2 = lock.lock_shared();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+    }
+
+    #[test]
+    fn shared_shared() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let _g1 = lock.lock_shared();
+            let _g2 = lock.lock_shared();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_ok());
+    }
+
+    #[test]
+    fn shared_drop_exclusive() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let g1 = lock.lock_shared();
+            drop(g1);
+            let _g2 = lock.lock_exclusive();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_ok());
+    }
+
+    #[test]
+    fn shared_shared_drop_exclusive() {
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let g1 = lock.lock_shared();
+            let _g2 = lock.lock_shared();
+            tx1.send(()).unwrap();
+            drop(g1);
+            let _g2 = lock.lock_exclusive();
+            tx2.send(()).unwrap();
+        });
+        assert!(rx1.recv_timeout(Duration::from_millis(10)).is_ok());
+        assert!(rx2.recv_timeout(Duration::from_millis(10)).is_err());
+    }
+
+    #[test]
+    fn shared_shared_drop_drop_exclusive() {
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let g1 = lock.lock_shared();
+            let g2 = lock.lock_shared();
+            tx1.send(()).unwrap();
+            drop(g1);
+            drop(g2);
+            let _g2 = lock.lock_exclusive();
+            tx2.send(()).unwrap();
+        });
+        assert!(rx1.recv_timeout(Duration::from_millis(10)).is_ok());
+        assert!(rx2.recv_timeout(Duration::from_millis(10)).is_ok());
+    }
+
+    #[test]
+    fn exclusive_drop_shared_shared() {
+        let (tx1, rx1) = mpsc::channel();
+        thread::spawn(move || {
+            let lock = Lock::new(5);
+            let g2 = lock.lock_exclusive();
+            drop(g2);
+            let _g1 = lock.lock_shared();
+            let _g2 = lock.lock_shared();
+            tx1.send(()).unwrap();
+        });
+        assert!(rx1.recv_timeout(Duration::from_millis(10)).is_ok());
+    }
+}
