@@ -2,6 +2,7 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::mem::{forget, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::*;
+use std::thread;
 
 use lock::{Lock, LockSharedGuard};
 
@@ -25,6 +26,10 @@ impl<T: Send + Sync> AVec<T> {
     ) -> LockSharedGuard<'a, AVecInner<T>> {
         if inner.cap < cap {
             let mut inner = inner.upgrade();
+            // upgrade loses the lock => we need to double check
+            if inner.cap >= cap {
+                return inner.downgrade();
+            }
             let new_inner = AVecInner {
                 data: unsafe { alloc(Layout::array::<T>(inner.cap * 2).unwrap()) as *mut T },
                 cap: inner.cap * 2,
@@ -138,7 +143,18 @@ unsafe impl<T: Send + Sync> Send for AVec<T> {}
 unsafe impl<T: Sync> Sync for AVec<T> {}
 
 fn main() {
-    let avec = AVec::new(1);
+    let avec = AVec::new(10);
+    thread::scope(|s| {
+        s.spawn(|| {
+            avec.push(2);
+            avec.push(3);
+            avec.push(4);
+            let el = avec.get(2).unwrap();
+            avec.push(5);
+            println!("Aaa {}", *el);
+            avec.push(1);
+        });
+    });
     avec.push(1);
     avec.push(2);
     avec.push(3);
@@ -152,7 +168,7 @@ fn main() {
 fn many_threads() {
     let avec = AVec::new(1);
     const THREAD_COUNT: usize = 12;
-    const ELEMENT_COUNT: usize = 20000;
+    const ELEMENT_COUNT: usize = 200;
     std::thread::scope(|s| {
         for _ in 0..THREAD_COUNT {
             s.spawn(|| {

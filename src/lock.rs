@@ -32,6 +32,8 @@ impl<'a, T> LockSharedGuard<'a, T> {
         Self { inner }
     }
 
+    /// there's a gap here, make sure to double check
+    /// the condition you entered it with in the first place
     pub fn upgrade(self) -> LockExclusiveGuard<'a, T> {
         let lock = self.inner;
         drop(self);
@@ -66,6 +68,7 @@ impl<'a, T> DerefMut for LockExclusiveGuard<'a, T> {
 }
 
 impl<'a, T> LockExclusiveGuard<'a, T> {
+    /// the lock stays locked without gaps
     pub fn downgrade(self) -> LockSharedGuard<'a, T> {
         self.inner.val.store(1, Ordering::Release);
         let inner = self.inner;
