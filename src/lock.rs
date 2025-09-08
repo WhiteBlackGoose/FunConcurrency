@@ -9,50 +9,33 @@ pub struct Lock<T> {
     data: UnsafeCell<T>,
 }
 
-pub struct LockSharedGuard<'a, T, F> {
-    rf: &'a F,
+pub struct LockSharedGuard<'a, T> {
     inner: &'a Lock<T>,
 }
 
-impl<'a, T, F> Drop for LockSharedGuard<'a, T, F> {
+impl<'a, T> Drop for LockSharedGuard<'a, T> {
     fn drop(&mut self) {
-        self.inner.val.fetch_sub(1, Ordering::Relaxed);
+        self.inner.val.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-impl<'a, T, F> Deref for LockSharedGuard<'a, T, F> {
-    type Target = F;
+impl<'a, T> Deref for LockSharedGuard<'a, T> {
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.rf
+        unsafe { &*self.inner.data.get() }
     }
 }
 
-impl<'a, T> LockSharedGuard<'a, T, T> {
+impl<'a, T> LockSharedGuard<'a, T> {
     fn new(inner: &'a Lock<T>) -> Self {
-        Self::new_mapped(inner, |a| a)
+        Self { inner }
     }
-}
 
-impl<'a, T, F> LockSharedGuard<'a, T, F> {
     pub fn upgrade(self) -> LockExclusiveGuard<'a, T> {
         let lock = self.inner;
         drop(self);
         lock.lock_exclusive()
-    }
-
-    pub fn new_mapped(inner: &'a Lock<T>, map: impl Fn(&'a T) -> &'a F) -> Self {
-        Self {
-            inner,
-            rf: map(unsafe { &*inner.data.get() }),
-        }
-    }
-
-    pub fn map<U>(self, map: impl Fn(&'a F) -> &'a U) -> LockSharedGuard<'a, T, U> {
-        let inner = self.inner;
-        let rf = self.rf;
-        forget(self);
-        LockSharedGuard { rf: map(rf), inner }
     }
 }
 
@@ -64,7 +47,7 @@ pub struct LockExclusiveGuard<'a, T> {
 
 impl<'a, T> Drop for LockExclusiveGuard<'a, T> {
     fn drop(&mut self) {
-        self.inner.val.store(0, Ordering::Relaxed);
+        self.inner.val.store(0, Ordering::Release);
     }
 }
 
@@ -83,8 +66,8 @@ impl<'a, T> DerefMut for LockExclusiveGuard<'a, T> {
 }
 
 impl<'a, T> LockExclusiveGuard<'a, T> {
-    pub fn downgrade(self) -> LockSharedGuard<'a, T, T> {
-        self.inner.val.store(1, Ordering::Relaxed);
+    pub fn downgrade(self) -> LockSharedGuard<'a, T> {
+        self.inner.val.store(1, Ordering::Release);
         let inner = self.inner;
         forget(self);
         LockSharedGuard::new(inner)
@@ -97,17 +80,18 @@ impl<T> Lock<T> {
     const LOCK_FREE: u64 = 0;
     const LOCK_ALLOC: u64 = 0x1 << 63;
 
-    pub fn lock_shared(&self) -> LockSharedGuard<'_, T, T> {
-        let mut current = 0;
-        let mut target = 1;
+    pub fn lock_shared(&self) -> LockSharedGuard<'_, T> {
+        let mut current = Self::LOCK_FREE;
+        let mut target = Self::LOCK_FREE + 1;
         loop {
             match self
                 .val
-                .compare_exchange(current, target, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange(current, target, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => break,
                 Err(Self::LOCK_ALLOC) => {
                     current = 0;
+                    target = 1;
                     hint::spin_loop();
                 }
                 Err(actual) => {
@@ -124,8 +108,8 @@ impl<T> Lock<T> {
             match self.val.compare_exchange(
                 Self::LOCK_FREE,
                 Self::LOCK_ALLOC,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::AcqRel,
+                Ordering::Acquire,
             ) {
                 Ok(_) => break,
                 Err(_) => {
@@ -144,9 +128,17 @@ impl<T> Lock<T> {
     }
 }
 
+unsafe impl<T: Send + Sync> Send for Lock<T> {}
+unsafe impl<T: Sync> Sync for Lock<T> {}
+
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        ops::{Deref, DerefMut},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
 
     use super::Lock;
 
@@ -206,10 +198,13 @@ mod tests {
         thread::spawn(move || {
             let lock = Lock::new(5);
             let g1 = lock.lock_shared();
-            let _g2 = lock.lock_shared();
+            let g2 = lock.lock_shared();
+            let r = g1.deref();
             tx1.send(()).unwrap();
-            drop(g1);
-            let _g2 = lock.lock_exclusive();
+            drop(g2);
+            let mut g3 = lock.lock_exclusive();
+            let r2 = g3.deref_mut();
+            *r2 = *r;
             tx2.send(()).unwrap();
         });
         assert!(rx1.recv_timeout(Duration::from_millis(10)).is_ok());
@@ -227,7 +222,7 @@ mod tests {
             tx1.send(()).unwrap();
             drop(g1);
             drop(g2);
-            let _g2 = lock.lock_exclusive();
+            let _g3 = lock.lock_exclusive();
             tx2.send(()).unwrap();
         });
         assert!(rx1.recv_timeout(Duration::from_millis(10)).is_ok());
@@ -246,5 +241,20 @@ mod tests {
             tx1.send(()).unwrap();
         });
         assert!(rx1.recv_timeout(Duration::from_millis(10)).is_ok());
+    }
+
+    #[test]
+    fn ub_mixed_access() {
+        let v = Lock::new(5);
+        thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    for i in 0..100 {
+                        *v.lock_exclusive() = i;
+                        drop(v.lock_shared());
+                    }
+                });
+            }
+        });
     }
 }

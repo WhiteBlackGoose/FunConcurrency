@@ -1,5 +1,6 @@
 use std::alloc::{alloc, dealloc, Layout};
 use std::mem::{forget, MaybeUninit};
+use std::ops::Deref;
 use std::sync::atomic::*;
 
 use lock::{Lock, LockSharedGuard};
@@ -20,8 +21,8 @@ impl<T: Send + Sync> AVec<T> {
     fn ensure_cap<'a>(
         &'a self,
         cap: usize,
-        inner: LockSharedGuard<'a, AVecInner<T>, AVecInner<T>>,
-    ) -> LockSharedGuard<'a, AVecInner<T>, AVecInner<T>> {
+        inner: LockSharedGuard<'a, AVecInner<T>>,
+    ) -> LockSharedGuard<'a, AVecInner<T>> {
         if inner.cap < cap {
             let mut inner = inner.upgrade();
             let new_inner = AVecInner {
@@ -83,16 +84,29 @@ impl<T: Send + Sync> AVec<T> {
         }
     }
 
-    fn get(&self, index: usize) -> Option<LockSharedGuard<'_, AVecInner<T>, T>> {
+    fn get(&self, index: usize) -> Option<AVecRefElement<'_, T>> {
         let inner = self.lock.lock_shared();
         if index >= inner.len.load(Ordering::Relaxed) {
             return None;
         }
-        Some(inner.map(|inner| unsafe { &*inner.data.add(index) }))
+        Some(AVecRefElement { inner, index })
     }
 
     fn len(&self) -> usize {
         self.lock.lock_shared().len.load(Ordering::Relaxed)
+    }
+}
+
+struct AVecRefElement<'a, T> {
+    inner: LockSharedGuard<'a, AVecInner<T>>,
+    index: usize,
+}
+
+impl<'a, T> Deref for AVecRefElement<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.inner.data.add(self.index) }
     }
 }
 
@@ -138,7 +152,7 @@ fn main() {
 fn many_threads() {
     let avec = AVec::new(1);
     const THREAD_COUNT: usize = 12;
-    const ELEMENT_COUNT: usize = 200;
+    const ELEMENT_COUNT: usize = 20000;
     std::thread::scope(|s| {
         for _ in 0..THREAD_COUNT {
             s.spawn(|| {
