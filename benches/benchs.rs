@@ -4,7 +4,7 @@ use std::{
 };
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use rst_test::{lock::Lock, AVec};
+use rst_test::{lock::Lock, spinmutex::SpinMutex, AVec};
 
 fn bench_push(c: &mut Criterion) {
     let el_count = 10000;
@@ -95,7 +95,7 @@ fn bench_get(c: &mut Criterion) {
 }
 
 fn bench_lock(c: &mut Criterion) {
-    let el_count = 30000;
+    let el_count = 30_000;
     for thread_count in [1, 4, 12] {
         let mut group = c.benchmark_group(format!("lock@{}", thread_count));
         group.bench_function(BenchmarkId::new("nolocks", ""), |b| {
@@ -105,7 +105,7 @@ fn bench_lock(c: &mut Criterion) {
                     for _ in 0..thread_count {
                         s.spawn(|| {
                             for i in 0..el_count {
-                                sum.fetch_add(i, std::sync::atomic::Ordering::Relaxed);
+                                sum.fetch_add(i, std::sync::atomic::Ordering::SeqCst);
                             }
                         });
                     }
@@ -121,7 +121,7 @@ fn bench_lock(c: &mut Criterion) {
                         s.spawn(|| {
                             for i in 0..el_count {
                                 let _guard = m.lock().unwrap();
-                                sum.fetch_add(i, std::sync::atomic::Ordering::Relaxed);
+                                sum.fetch_add(i, std::sync::atomic::Ordering::SeqCst);
                             }
                         });
                     }
@@ -137,7 +137,7 @@ fn bench_lock(c: &mut Criterion) {
                         s.spawn(|| {
                             for i in 0..el_count {
                                 let _guard = l.lock_shared();
-                                sum.fetch_add(i, std::sync::atomic::Ordering::Relaxed);
+                                sum.fetch_add(i, std::sync::atomic::Ordering::SeqCst);
                             }
                         });
                     }
@@ -153,7 +153,23 @@ fn bench_lock(c: &mut Criterion) {
                         s.spawn(|| {
                             for i in 0..el_count {
                                 let _guard = l.lock_exclusive();
-                                sum.fetch_add(i, std::sync::atomic::Ordering::Relaxed);
+                                sum.fetch_add(i, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        group.bench_function(BenchmarkId::new("spinmutex", ""), |b| {
+            b.iter(|| {
+                let sum = AtomicUsize::new(0);
+                let l = SpinMutex::new(());
+                thread::scope(|s| {
+                    for _ in 0..thread_count {
+                        s.spawn(|| {
+                            for i in 0..el_count {
+                                let _guard = l.lock();
+                                sum.fetch_add(i, std::sync::atomic::Ordering::SeqCst);
                             }
                         });
                     }

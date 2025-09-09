@@ -15,7 +15,7 @@ pub struct LockSharedGuard<'a, T> {
 
 impl<'a, T> Drop for LockSharedGuard<'a, T> {
     fn drop(&mut self) {
-        self.inner.val.fetch_sub(1, Ordering::AcqRel);
+        self.inner.val.fetch_sub(1, Ordering::Acquire);
     }
 }
 
@@ -49,7 +49,9 @@ pub struct LockExclusiveGuard<'a, T> {
 
 impl<'a, T> Drop for LockExclusiveGuard<'a, T> {
     fn drop(&mut self) {
-        self.inner.val.store(0, Ordering::Release);
+        self.inner
+            .val
+            .store(Lock::<T>::LOCK_FREE, Ordering::Release);
     }
 }
 
@@ -85,21 +87,20 @@ impl<T> Lock<T> {
 
     pub fn lock_shared(&self) -> LockSharedGuard<'_, T> {
         let mut current = Self::LOCK_FREE;
-        let mut target = Self::LOCK_FREE + 1;
         loop {
-            match self
-                .val
-                .compare_exchange(current, target, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.val.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(Self::LOCK_ALLOC) => {
                     current = 0;
-                    target = 1;
                     hint::spin_loop();
                 }
                 Err(actual) => {
                     current = actual;
-                    target = actual + 1;
                 }
             }
         }
@@ -108,11 +109,11 @@ impl<T> Lock<T> {
 
     pub fn lock_exclusive(&self) -> LockExclusiveGuard<'_, T> {
         loop {
-            match self.val.compare_exchange(
+            match self.val.compare_exchange_weak(
                 Self::LOCK_FREE,
                 Self::LOCK_ALLOC,
-                Ordering::AcqRel,
                 Ordering::Acquire,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(_) => {

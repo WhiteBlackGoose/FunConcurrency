@@ -6,6 +6,7 @@ use std::sync::atomic::*;
 use lock::{Lock, LockSharedGuard};
 
 pub mod lock;
+pub mod spinmutex;
 
 struct AVecInner<T> {
     data: *mut T,
