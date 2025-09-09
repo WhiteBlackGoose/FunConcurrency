@@ -83,7 +83,7 @@ impl<'a, T> LockExclusiveGuard<'a, T> {
 
 impl<T> Lock<T> {
     const LOCK_FREE: u64 = 0;
-    const LOCK_ALLOC: u64 = 0x1 << 63;
+    const LOCK_EXCL: u64 = 0x1 << 63;
 
     pub fn lock_shared(&self) -> LockSharedGuard<'_, T> {
         let mut current = Self::LOCK_FREE;
@@ -95,12 +95,13 @@ impl<T> Lock<T> {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => break,
-                Err(Self::LOCK_ALLOC) => {
+                Err(Self::LOCK_EXCL) => {
                     current = 0;
                     hint::spin_loop();
                 }
                 Err(actual) => {
                     current = actual;
+                    hint::spin_loop();
                 }
             }
         }
@@ -111,7 +112,7 @@ impl<T> Lock<T> {
         loop {
             match self.val.compare_exchange_weak(
                 Self::LOCK_FREE,
-                Self::LOCK_ALLOC,
+                Self::LOCK_EXCL,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
