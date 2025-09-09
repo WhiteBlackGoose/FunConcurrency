@@ -5,7 +5,7 @@ use std::sync::atomic::*;
 
 use lock::{Lock, LockSharedGuard};
 
-mod lock;
+pub mod lock;
 
 struct AVecInner<T> {
     data: *mut T,
